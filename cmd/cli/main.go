@@ -1,22 +1,27 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	bolt "github.com/etcd-io/bbolt"
-	"github.com/manifoldco/promptui"
 	"github.com/micro/cli"
 	"log"
 	"os"
 	w "sources.witchery.io/coven/cold-wallet"
 	"sources.witchery.io/coven/cold-wallet/config"
+	"strings"
 )
 
 var (
-	app     = cli.NewApp()
-	wallet  w.Wallet
-	testNet bool
-	isForce bool
+	app      = cli.NewApp()
+	wallet   w.Wallet
+	testNet  bool
+	forceRun bool
+
+	backupStr = "\nPlease write down this backup phrase in safe place.\n"+
+		"Without this you will not be able to restore your wallet.\n"+
+		"=====================================================================================\n"+
+		"%s\n"+
+		"=====================================================================================\n"
 )
 
 func main() {
@@ -55,19 +60,38 @@ func info() {
 }
 
 func commands() {
+	testFlag := cli.BoolFlag{
+		Name:        "test, t",
+		Usage:       "set network type to test",
+		Destination: &testNet,
+	}
+	forceFlag := cli.BoolFlag{
+		Name:        "force, f",
+		Usage:       "Use force flag if you want run force command execution",
+		Destination: &forceRun,
+	}
+
+	// global flags
+	app.Flags = []cli.Flag{
+		testFlag,
+		forceFlag,
+	}
+
 	app.Commands = []cli.Command{
 		{
 			Name:      "create",
 			Aliases:   []string{"c"},
 			Usage:     "This command creates new wallet. Appropriate message will be returned if wallet already created.",
 			ArgsUsage: "Usage: create ['passphrase']",
+			Flags:     []cli.Flag{forceFlag},
 			Action:    create,
 		},
 		{
-			Name:      "restore",
-			Usage:     "Restore the wallet",
-			ArgsUsage: "Usage: restore ['12 world mnemonic phrase', 'passphrase']",
-			Action:    restore,
+			Name:      "import",
+			Usage:     "Restore the wallet from 12 world mnemonic phrase",
+			ArgsUsage: "Usage: import ['12 world mnemonic phrase', 'passphrase']",
+			Flags:     []cli.Flag{forceFlag},
+			Action:    importExisting,
 		},
 		{
 			Name:      "export",
@@ -76,18 +100,12 @@ func commands() {
 			ArgsUsage: "Usage: export ['passphrase']",
 			Action:    export,
 		},
-	}
-
-	app.Flags = []cli.Flag{
-		cli.BoolFlag{
-			Name:        "test, t",
-			Usage:       "set network type to test",
-			Destination: &testNet,
-		},
-		cli.BoolFlag{
-			Name:        "force, f",
-			Usage:       "Use force flag if you want run force command execution",
-			Destination: &isForce,
+		{
+			Name:      "backup",
+			Aliases:   []string{"b"},
+			Usage:     "Backup wallet",
+			ArgsUsage: "Usage: backup ['passphrase']",
+			Action:    backup,
 		},
 	}
 }
@@ -99,46 +117,69 @@ func create(c *cli.Context) {
 	}
 	passphrase := c.Args().Get(1)
 
-	//fmt.Println("passphrase:", passphrase)
-	//fmt.Println("test:", testNet)
-
-
-	err := wallet.Create(passphrase)
+	mnemonic, err := wallet.Create(passphrase, forceRun)
+	if _, existsError := err.(*w.WalletExistsError); existsError {
+		log.Printf("Your wallet already created.\n" +
+			"You can use -f flag to overwrite existing wallet\n" +
+			"NOTE: All old data will be lost forever! " +
+			"Do not forget to backup your wallet first")
+		return
+	}
 	if err != nil {
 		log.Println(err)
 	}
+	log.Printf(backupStr, mnemonic)
 }
 
-func restore(c *cli.Context) {
+func importExisting(c *cli.Context) {
 	if c.NArg() != 2 {
 		fmt.Println(c.Command.ArgsUsage)
 		return
 	}
 
 	mnemonic := c.Args().Get(0)
+
+	if len(strings.Fields(mnemonic)) != 12 {
+		log.Println("Invalid mnemonic phrase")
+		return
+	}
 	passphrase := c.Args().Get(1)
 
-	fmt.Println("mnemonic:", mnemonic)
-	fmt.Println("passphrase:", passphrase)
+	err := wallet.Import(mnemonic, passphrase, forceRun)
+	if _, existsError := err.(*w.WalletExistsError); existsError {
+		log.Printf("You trying to import on top of exsisting wallet.\n" +
+			"You can use -f flag to overwrite existing wallet\n" +
+			"NOTE: All old data will be lost forever! " +
+			"Do not forget to backup your wallet first")
+		return
+	}
+	if err != nil {
+		log.Println(err)
+	}
 }
 
 func export(c *cli.Context) {
-	//fmt.Println(c.Args())
-	prompt := promptui.Prompt{
-		Label: "Search",
-		Validate: func(input string) error {
-			if len(input) < 3 {
-				return errors.New("search term must have at least 3 characters")
-			}
-			return nil
-		},
+	passphrase := c.Args().First()
+	if passphrase == "" {
+		fmt.Println(c.Command.ArgsUsage)
+		return
 	}
 
-	keyword, err := prompt.Run()
+	fmt.Println("pass", passphrase)
+}
+
+func backup(c *cli.Context) {
+	passphrase := c.Args().First()
+	if passphrase == "" {
+		fmt.Println(c.Command.ArgsUsage)
+		return
+	}
+
+	backupPhrase, err := wallet.Backup(passphrase)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		log.Println(err)
+		return
 	}
 
-	fmt.Println(keyword)
+	log.Printf(backupStr, backupPhrase)
 }
