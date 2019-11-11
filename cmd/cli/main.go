@@ -115,7 +115,7 @@ func create(c *cli.Context) {
 		fmt.Println(c.Command.ArgsUsage)
 		return
 	}
-	passphrase := c.Args().Get(1)
+	passphrase := c.Args().Get(0)
 
 	mnemonic, err := wallet.Create(passphrase, forceRun)
 	if _, existsError := err.(*w.WalletExistsError); existsError {
@@ -165,7 +165,11 @@ func export(c *cli.Context) {
 		return
 	}
 
-	fmt.Println("pass", passphrase)
+	err := wallet.Export(os.Stdout, passphrase)
+	if err != nil {
+		log.Println(err)
+		return
+	}
 }
 
 func backup(c *cli.Context) {

@@ -12,5 +12,5 @@ require (
 	github.com/micro/cli v0.2.0
 	github.com/tyler-smith/go-bip39 v1.0.2
 	gopkg.in/alecthomas/kingpin.v3-unstable v3.0.0-20180810215634-df19058c872c // indirect
-	sources.witchery.io/packages/wallet v0.0.0-20191105122424-72bc4a9ada72
+	sources.witchery.io/packages/wallet v0.0.0-20191107093720-eaf641458f1d
 )

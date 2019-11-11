@@ -2,6 +2,7 @@ package cold_wallet
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -10,9 +11,8 @@ import (
 	"github.com/tyler-smith/go-bip39"
 	"io"
 	"sources.witchery.io/coven/cold-wallet/config"
+	"sources.witchery.io/coven/cold-wallet/internal/encrypting"
 	"sources.witchery.io/packages/wallet/coin"
-
-	//"sources.witchery.io/pkg/wallet/currency"
 )
 
 const (
@@ -20,16 +20,13 @@ const (
 	mnemonicPhraseKey = "mk"
 	privatePrefix     = "prv"
 	publicPrefix      = "pub"
-	netPrefix         = "x"
-	testNetPrefix     = "t"
 	// Purpose is a constant set to 44' (or 0x8000002C) following the BIP43 recommendation.
 	// It indicates that the subtree of this node is used according to this specification.
-	Purpose         = 0x8000002C
-	CoinTypeTestNet = 0x80000001 // for all coins
+	Purpose = 0x8000002C
 )
 
 type Wallet interface {
-	Export(io.Writer) error
+	Export(w io.Writer, passphrase string) error
 	Create(passphrase string, forceRun bool) (string, error)
 	Import(mnemonic, passphrase string, forceRun bool) error
 	Backup(passphrase string) (string, error)
@@ -48,8 +45,37 @@ type wallet struct {
 	db  *bolt.DB
 }
 
-func (w *wallet) Export(io.Writer) error {
-	panic("implement me")
+func (w *wallet) Export(writer io.Writer, passphrase string) error {
+	enc, err := encrypting.New(passphrase)
+	if err != nil {
+		return err
+	}
+
+	return w.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket([]byte(mainDataBucket)).Cursor()
+
+		prefix := []byte(publicPrefix)
+		var m = map[string]string{}
+		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			k = bytes.TrimPrefix(k, prefix)
+
+			ev, err := enc.Decrypt(v)
+			if err != nil {
+				return err
+			}
+
+			m[string(k)] = string(ev)
+		}
+
+		enc := json.NewEncoder(writer)
+		enc.SetIndent("", "    ")
+		err := enc.Encode(&m)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
 }
 
 func (w *wallet) Create(passphrase string, force bool) (string, error) {
@@ -85,7 +111,12 @@ func (w *wallet) Import(mnemonic, passphrase string, force bool) error {
 		}
 	}
 
-	err := w.store(mnemonicPhraseKey, mnemonic, passphrase)
+	err := w.storeChainKeyPairs(mnemonic, passphrase)
+	if err != nil {
+		return err
+	}
+
+	err = w.store(mnemonicPhraseKey, mnemonic, passphrase)
 	if err != nil {
 		return err
 	}
@@ -111,61 +142,66 @@ func (w *wallet) storeChainKeyPairs(mnemonic, passphrase string) error {
 		return err
 	}
 
-	fmt.Println("mnemonic phrase: ", mnemonic)
+	masterKey, err := masterKeyFromMnemonic(mnemonic)
+	if err != nil {
+		return tx.Rollback()
+	}
 
-	for _, testNet := range []bool{true, false} {
-		masterKey, err := masterKeyFromMnemonic(mnemonic, testNet)
+	enc, err := encrypting.New(passphrase)
+	if err != nil {
+		return err
+	}
+
+	for coinName, coinType := range coin.SupportedCoinTypes() {
+		if coinName == coin.NameTestBTC {
+			masterKey.SetNet(&chaincfg.TestNet3Params)
+		} else {
+			masterKey.SetNet(&chaincfg.MainNetParams)
+		}
+		coinChainKey, err := GetCurrencyChain(masterKey, coinType)
 		if err != nil {
 			return tx.Rollback()
 		}
 
-		for coinName, coinType := range coin.SupportedCoinTypes() {
-			if testNet {
-				coinType = CoinTypeTestNet
-			}
-			coinChainKey, err := GetCurrencyChain(masterKey, coinType)
-			if err != nil {
-				return tx.Rollback()
-			}
+		keyPrv := bytes.Join([][]byte{[]byte(privatePrefix), []byte(coinName)}, []byte{})
+		keyPub := bytes.Join([][]byte{[]byte(publicPrefix), []byte(coinName)}, []byte{})
 
-			keyPrefix := netPrefix
-			if testNet {
-				keyPrefix = testNetPrefix
-			}
-
-			keyPrv := bytes.Join([][]byte{[]byte(keyPrefix), []byte(privatePrefix), []byte(coinName)}, []byte{})
-			keyPub := bytes.Join([][]byte{[]byte(keyPrefix), []byte(publicPrefix), []byte(coinName)}, []byte{})
-
-			err = tx.Bucket([]byte(mainDataBucket)).Put(keyPrv, []byte(coinChainKey.String()))
-			if err != nil {
-				return tx.Rollback()
-			}
-
-			neutered, _ := coinChainKey.Neuter()
-			err = tx.Bucket([]byte(mainDataBucket)).Put(keyPub, []byte(neutered.String()))
-			if err != nil {
-				return tx.Rollback()
-			}
-
-			fmt.Printf("%s is %s\n", string(keyPrv), coinChainKey.String())
-			fmt.Printf("%s is %s\n", string(keyPub), neutered.String())
+		v, err := enc.Encrypt([]byte(coinChainKey.String()))
+		if err != nil {
+			return tx.Rollback()
 		}
+
+		err = tx.Bucket([]byte(mainDataBucket)).Put(keyPrv, v)
+		if err != nil {
+			return tx.Rollback()
+		}
+
+		neutered, _ := coinChainKey.Neuter()
+
+		v, err = enc.Encrypt([]byte(neutered.String()))
+		if err != nil {
+			return tx.Rollback()
+		}
+
+		err = tx.Bucket([]byte(mainDataBucket)).Put(keyPub, v)
+		if err != nil {
+			return tx.Rollback()
+		}
+
+		fmt.Printf("%s is %s\n", string(keyPrv), coinChainKey.String())
+		fmt.Printf("%s is %s\n", string(keyPub), neutered.String())
 	}
 
 	return tx.Commit()
 }
 
-func masterKeyFromMnemonic(mnemonic string, testNet bool) (*hdkeychain.ExtendedKey, error) {
+func masterKeyFromMnemonic(mnemonic string) (*hdkeychain.ExtendedKey, error) {
 	seedBytes, err := bip39.NewSeedWithErrorChecking(mnemonic, "")
 	if err != nil {
 		return nil, err
 	}
 
-	netParams := &chaincfg.MainNetParams
-	if testNet {
-		netParams = &chaincfg.TestNet3Params
-	}
-	return hdkeychain.NewMaster(seedBytes, netParams)
+	return hdkeychain.NewMaster(seedBytes, &chaincfg.MainNetParams)
 }
 
 func GetCurrencyChain(master *hdkeychain.ExtendedKey, coinType uint32) (*hdkeychain.ExtendedKey, error) {
@@ -193,26 +229,44 @@ func GetCurrencyChain(master *hdkeychain.ExtendedKey, coinType uint32) (*hdkeych
 }
 
 func (w *wallet) retrieve(key, passphrase string) (string, error) {
-	var strData string
+	var data []byte
 	err := w.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(mainDataBucket))
-		v := b.Get([]byte(key))
-		strData = string(v)
+		data = b.Get([]byte(key))
 		return nil
 	})
 
 	if err != nil {
-		return strData, err
+		return "", err
 	}
 
-	return strData, nil
+	enc, err := encrypting.New(passphrase)
+	if err != nil {
+		return "", err
+	}
+
+	data, err = enc.Decrypt(data)
+	if err != nil {
+		return  "", err
+	}
+
+	return string(data), nil
 }
 func (w *wallet) store(key, value, passphrase string) error {
-	// todo: encrypt
+	v := []byte(value)
+	enc, err := encrypting.New(passphrase)
+	if err != nil {
+		return err
+	}
+
+	v, err = enc.Encrypt(v)
+	if err != nil {
+		return err
+	}
 
 	return w.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(mainDataBucket))
-		err := b.Put([]byte(key), []byte(value))
+		err := b.Put([]byte(key), v)
 		return err
 	})
 }
