@@ -127,6 +127,7 @@ func create(c *cli.Context) {
 	}
 	if err != nil {
 		log.Println(err)
+		return
 	}
 	log.Printf(backupStr, mnemonic)
 }

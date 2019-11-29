@@ -187,9 +187,6 @@ func (w *wallet) storeChainKeyPairs(mnemonic, passphrase string) error {
 		if err != nil {
 			return tx.Rollback()
 		}
-
-		fmt.Printf("%s is %s\n", string(keyPrv), coinChainKey.String())
-		fmt.Printf("%s is %s\n", string(keyPub), neutered.String())
 	}
 
 	return tx.Commit()
